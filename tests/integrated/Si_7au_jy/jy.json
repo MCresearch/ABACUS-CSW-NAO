@@ -1,0 +1,46 @@
+{
+    "environment": "",
+    "mpi_command": "mpirun -np 8",
+    "abacus_command": "abacus",
+
+    "element": "Si",
+    "pseudo_dir": "../../pporb/Si_ONCV_PBE-1.0.upf",
+    
+    "fit_basis": "jy",
+    "ecutwfc": 60,
+
+    "ecutjy": 40,
+    "bessel_nao_rcut": [7],
+    "primitive_type": "reduced",
+
+    "spill_guess": "atomic",
+    "optimizer": "scipy.bfgs",
+    "torch.lr": 0.001,
+    "max_steps": 9000,
+    "nthreads_rcut": 4,
+
+    "geoms": [
+        {
+            "proto": "dimer",
+            "pertkind": "stretch",
+            "pertmags": "auto",
+            "nbands": 8,
+            "nspin": 1,
+            "lmaxmax": 2
+        }
+    ],
+    "orbitals": [
+        {
+            "nzeta": [1, 1, 0],
+            "geoms": [0],
+            "nbands": "occ",
+            "checkpoint": null
+        },
+        {
+            "nzeta": [1, 1, 1],
+            "geoms": [0],
+            "nbands": "occ",
+            "checkpoint": 0
+        }
+    ]
+}

@@ -1,0 +1,54 @@
+{
+    "environment": "",
+    "mpi_command": "mpirun -np 8",
+    "abacus_command": "abacus",
+
+    "element": "Nd",
+    "pseudo_dir": "Nd-sp.PD04.PBE.UPF",
+
+    "fit_basis": "jy",
+    "ecutwfc": 150,
+    "smearing_method": "gauss",
+    "smearing_sigma": "0.03",
+    "mixing_type": "broyden",
+    "mixing_beta": 0.02,
+
+    "ecutjy": 60,
+    "bessel_nao_rcut": [9],
+    "primitive_type": "reduced",
+
+    "spill_guess": "atomic",
+    "optimizer": "torch.swats",
+    "torch.lr": 0.001,
+    "max_steps": 10000,
+    "nthreads_rcut": 4,
+
+    "geoms": [
+        {
+            "proto": "dimer",
+            "pertkind": "stretch",
+            "pertmags": "auto",
+            "nbands": 40,
+            "nspin": 1,
+            "lmaxmax": 4
+        }
+    ],
+
+    "orbitals": [
+        {
+            "nzeta": [2, 1, 1, 1, 0],
+            "geoms": [0],
+            "nbands": "occ",
+            "checkpoint": null
+        },
+        {
+            "nzeta": [3, 2, 2, 2, 1],
+            "geoms": [0],
+            "nbands": 40,
+            "checkpoint": 0,
+            "fix_components": [[], [], [], [], [0]],
+            "lloc_min": 4,
+            "vloc_aux": "Nd-sp.PD04.PBE.UPF"
+        }
+    ]
+}

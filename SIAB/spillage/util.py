@@ -1,0 +1,239 @@
+# in-built modules
+import os
+import unittest
+import re
+import logging
+
+# third-party modules
+import numpy as np
+from scipy.integrate import simps
+
+# local modules
+from SIAB.driver.control import OrbgenAssert
+from SIAB.spillage.datparse import read_istate_info, read_input_script, read_kpoints
+from SIAB.spillage.radial import _nbes
+
+def _legacy_dft2spillparam(calculation_settings, siab_settings, folders):
+    '''this function for new method (bfgs) is just a way to make the interface
+    unified with the old version of SIAB.
+    But there are indeed some tedious work to do:
+    
+    1. get all the orbital identifier rcut(s), ecut and the element symbol
+    2. extract the orbital optimization options (important: refresh the nbands_ref
+    if it is specified as str involving `occ` and `all`)
+    '''
+    rcuts = calculation_settings[0]["bessel_nao_rcut"]
+    rcuts = [rcuts] if not isinstance(rcuts, list) else rcuts
+    ecut = calculation_settings[0]["ecutwfc"]
+    elem = [f for f in folders if len(f) > 0][0][0].split("-")[0]
+    # because element does not really matter when optimizing orbitals, the only thing
+    # has element information is the name of folder. So we extract the element from the
+    # first folder name. Not elegant, we know.
+    primitive_type = siab_settings.get("primitive_type", "reduced")
+
+    run_map = {"none": "none", "restart": "restart", "bfgs": "opt"}
+    run_type = run_map.get(siab_settings.get("optimizer", "none"), "none")
+
+    # FIXME: it is also possible to let the orb['nbands_ref'] to be dependent on the
+    # rcut, but not for now...
+    orbparams = siab_settings["orbitals"]
+    for orb in orbparams:
+
+        # indexes of folders, it is from the geometries to refer, make it a list
+        indf = orb.get("folder", 0)
+        if not isinstance(indf, list):
+            indf = [indf]
+            
+        # nbands to ref, make it a list. This means all perts in one geom share
+        # the same nbands_ref
+        nbnd = orb.get("nbands_ref", 0)
+        if not isinstance(nbnd, list):
+            nbnd = [nbnd] * len(indf)
+        
+        # write-back
+        orb["folder"] = indf # only one-layer of indexes, means select all perts of one geom
+        orb["nbands_ref"] = [[_spil_bnd_autoset(nb, f) for f in folders[i]
+                             if f'{rcuts[0]}au' in f] # HERE can introduce the dependence on rcut
+                             for nb, i in zip(nbnd, indf)]
+        # now the folder is list of indexes igeom
+        # now the nbands_ref is indexed by [igeom][ipert]
+
+    shared_option = {'orbparams': orbparams, 
+                     'maxiter': siab_settings.get("max_steps", 2000),
+                     'nthreads': siab_settings.get("nthreads", 4),
+                     'jy': calculation_settings[0].get('basis_type', 'pw') != 'pw',
+                     'spill_coefs': siab_settings.get("spill_coefs", None)}
+
+    return rcuts, ecut, elem, primitive_type, run_type, shared_option
+
+def literal_eval(expr):
+    '''evaluate the expression, but only allow the basic arithmetic operations'''
+    allowed = set('+-*/()0123456789')
+    OrbgenAssert(set(expr) <= allowed, 
+                 f"Expression {expr} contains invalid characters")
+    words = re.findall(r'\d+|\+|\-|\*|\/|\(|\)', expr)
+    OrbgenAssert(words[0].isdigit(),
+                 f'Not supported expression {expr}')
+    out = int(words[0])
+    op_map = {'+': lambda x, y: x + y,
+              '-': lambda x, y: x - y,
+              '*': lambda x, y: x * y,
+              '/': lambda x, y: x / y}
+    op = None
+    for w in words[1:]:
+        if w.isdigit():
+            OrbgenAssert(op is not None,
+                         f'Not supported expression {expr}')
+            out = op_map[op](out, int(w))
+        else:
+            op = w
+    return out
+
+def _spil_bnd_autoset(pattern: int|str, 
+                      folder: str,
+                      occ_thr = 5e-1,
+                      merge_sk = 'max'):
+    '''set the range of bands to optimize the Spillage
+    
+    Parameters
+    ----------
+    pattern : str
+        the value of nbands_ref set by user, might be `occ` or `all` or
+        simple algebratic expression. Or a simple integer.
+    folder: str
+        for `occ`, `all` and related expressions, the istate.info file
+        is needed to determine the number of bands to optimize.
+    occ_thr: float
+        the threshold to determine the occupied bands, default is 5e-1
+    merge_sk: str
+        decide how to merge_sk the bands of different spins and kpoints,
+        , can be `max`, `min` or `mean`, default is `max`
+    Returns
+    -------
+    int
+        the number of bands to optimize
+    '''
+
+    parent = os.path.dirname(folder)
+    base = os.path.basename(folder)
+    if 'OUT.' not in base:
+        param = read_input_script(os.path.join(folder, 'INPUT'))
+        folder = 'OUT.' + param.get('suffix', 'ABACUS')
+        folder = os.path.join(parent, base, folder)
+
+    # occ indexed by [ispin][ik][ibnd]
+    kpts, _, occ = read_istate_info(os.path.join(folder, 'istate.info'))
+    kpts_, wk = read_kpoints(os.path.join(folder, 'kpoints'))
+    OrbgenAssert(np.allclose(kpts, kpts_),
+                 f'Inconsistent kpoints in {folder}/ istate.info and kpoints')
+
+    nbnd = [[(len(occ_sk), len(np.where(np.array(occ_sk) >= occ_thr*w)[0])) 
+             for occ_sk, w in zip(occ_sp, wk)] for occ_sp in occ]
+    nbnd = np.array(nbnd).reshape(-1, 2)
+    OrbgenAssert(nbnd.shape == (len(kpts)*len(occ), 2), 
+                 f'Inconsistent shape of nbnd {nbnd.shape}')
+    
+    # take min, max or mean of the bands over all (ispin, ik) on (nbands, occ_bands)
+    try:
+        nbnd = {'max': nbnd.max(axis=0), 
+                'min': nbnd.min(axis=0), 
+                'mean': nbnd.mean(axis=0)}[merge_sk]
+    except KeyError:
+        OrbgenAssert(False, f"merge_sk method {merge_sk} is not supported")
+    
+    nall, nocc = nbnd
+    if isinstance(pattern, int):
+        OrbgenAssert(pattern >= 0 and pattern <= nall,
+                     f'nbands_ref {pattern} is out of range (0, {nall})')
+        return pattern
+    else:
+        OrbgenAssert(isinstance(pattern, str), f"nbands_ref {pattern} is not a string.")
+    try:
+        return int(literal_eval(pattern.replace('occ', str(nocc)).replace('all', str(nall))))
+    except (ValueError, SyntaxError):
+        OrbgenAssert(False, f"nbands_ref {pattern} is not a valid expression.")
+
+def _spill_opt_param(raw):
+    '''convert the scheme to the spillage module acceptable parameters
+    
+    Parameters
+    ----------
+    raw : dict
+        the scheme of how to generate the orbitals
+    
+    Returns
+    -------
+    dict
+        the spillage module acceptable parameters
+    '''
+    SCIPY_SUPPORTED = ['ftol', 'gtol', 'maxcor']
+    TORCH_SUPPORTED = ['lr', 'beta', 'eps', 'weight_decay']
+
+    common = {'maxiter': raw.get('max_steps', 5000), 
+              'disp': raw.get('verbose', True)}
+    scipy_ = {k.replace('scipy.', ''): v for k, v in raw.items() 
+              if k.startswith('scipy.') and k.split('.')[1] in SCIPY_SUPPORTED}
+    torch_ = {k.replace('torch.', ''): v for k, v in raw.items() 
+              if k.startswith('torch.') and k.split('.')[1] in TORCH_SUPPORTED}
+    
+    optimizer = raw.get('optimizer', 'scipy.bfgs')
+    impl, method = optimizer.split('.')
+    OrbgenAssert(impl in ['scipy', 'torch'],
+                 f'Optimizer implementation {impl} is not supported')
+
+    specific = scipy_ if impl == 'scipy' else torch_|{'method': method}
+    
+    logging.info('')
+    logging.info('SPILLAGE OPTIMIZATION PARAMETERIZATION SUMMARY')
+    logging.info('                   * * *                      ')
+    logging.info(f'{"optimizer":<10s} {optimizer}')
+    for k, v in common.items():
+        logging.info(f'{k:<10s} {v}')
+    for k, v in specific.items():
+        logging.info(f'{k:<10s} {v}')
+    logging.info('')
+    
+    return optimizer, {**common, **specific}
+
+class TestSpillageUtilities(unittest.TestCase):
+    def test_spil_bnd_autoset(self):
+        here = os.path.dirname(__file__)
+        outdir = os.path.join(here, 'testfiles', 'Si', 'jy-7au', 'monomer-k')
+        
+        # test for simple integer
+        out = _spil_bnd_autoset(10, outdir)
+        self.assertEqual(out, 10)
+
+        # out of band range
+        with self.assertRaises(ValueError):
+            _spil_bnd_autoset(10000, outdir)
+        
+        # occ
+        out = _spil_bnd_autoset('occ', outdir)
+        self.assertEqual(out, 4)
+
+        # all
+        out = _spil_bnd_autoset('all', outdir)
+        self.assertEqual(out, 25)
+
+        # simple expression
+        out = _spil_bnd_autoset('occ+2', outdir)
+        self.assertEqual(out, 6)
+
+        out = _spil_bnd_autoset('all-2', outdir)
+        self.assertEqual(out, 23)
+
+    def test_spilparam(self):
+
+        test = {'max_steps': 1000, 'verbose': False, 'optimizer': 'scipy.bfgs',
+                'scipy.ftol': 1e-6, 'scipy.gtol': 1e-6, 'scipy.maxcor': 10}
+        optimizer, options = _spill_opt_param(test)
+        self.assertEqual(optimizer, 'scipy.bfgs')
+        self.assertEqual(options['maxiter'], 1000)
+        self.assertEqual(options['disp'], False)
+        self.assertEqual(options['ftol'], 1e-6)
+        self.assertEqual(options['gtol'], 1e-6)
+        self.assertEqual(options['maxcor'], 10)
+
+if __name__ == "__main__":
+    unittest.main()

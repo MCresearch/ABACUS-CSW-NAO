@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools", "wheel", "setuptools_scm[toml]"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "SIAB"
+dynamic = ["version"]
+requires-python = "<3.11" # required by SciPy 1.10
+description = ""
+readme = "README.md"
+authors = [
+    { name = "kirk0830", email = "yike.huang@aliyun.com" }
+]
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "scipy<1.10", # required by some functionalities employing the old version simpson integral
+    "torch",
+    "torch_optimizer",
+    "torch_complex",
+    "addict"
+]
+
+[tool.setuptools_scm]
+local_scheme = "no-local-version"
+version_scheme = "release-branch-semver"
+write_to = "SIAB/_version.py"
+
+[project.scripts]
+orbgen = "SIAB.orbgen:main"
+projgen = "SIAB.projgen:main"
